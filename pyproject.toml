@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "catllm"
+version = "0.1.0"
+description = "CattLLM: role-aware RAG chat for cattle genetics (Streamlit + FAISS)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+authors = [{ name = "You" }]
+
+# Core runtime deps. Versions chosen to match what you've been using.
+dependencies = [
+  "streamlit==1.38.0",
+  "openai>=1.40.0",
+  "faiss-cpu==1.8.0.post1",
+  "pypdf==4.3.1",
+  "numpy==1.26.4",
+  "pandas>=2.2.0",
+  "pyarrow>=14.0.0",
+  # Optional but used by features in this app:
+  "pillow>=10.0.0",          # for OCR image handling
+  "pdf2image>=1.17.0",       # OCR fallback (requires Poppler installed on OS)
+  "pytesseract>=0.3.10",     # OCR fallback (requires Tesseract installed on OS)
+  "openpyxl>=3.1.2",         # reading XLSX in Q&A generator
+]
+
+[tool.setuptools.packages.find]
+include = ["catllm*"]
+
+[tool.setuptools]
+package-dir = {"" = "."}
