@@ -16,4 +16,4 @@ pypdf>=4.2.0
 
 # Auth & config
 PyYAML>=6.0.2
-bcrypt>=4.2.0
+passlib[bcrypt]>=1.7.4
