@@ -12,6 +12,7 @@ numpy>=1.26.0
 pandas>=2.2.0
 tiktoken>=0.7.0
 pydantic>=2.8.0
+pypdf>=4.2.0
 
 # Auth & config
 PyYAML>=6.0.2
