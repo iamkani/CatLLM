@@ -1,11 +1,13 @@
+import os
 import streamlit as st
 
-# Gate the app before anything else renders
+# Export any Streamlit Cloud secrets into environment variables
+for k, v in dict(getattr(st, 'secrets', {})).items():
+    os.environ.setdefault(str(k), str(v))
+
 from catllm.ui_auth_gate import require_login, user_bar, admin_console
 current_user = require_login()
 user_bar()
 admin_console()
 
-# Import the existing UI module so it renders as before
-# If your app previously executed logic in app.py, move it to catllm/ui_streamlit.py
-from catllm import ui_streamlit  # noqa: F401  (import side-effects render the UI)
+from catllm import ui_streamlit  # noqa: F401
