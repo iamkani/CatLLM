@@ -26,32 +26,38 @@ try:
         _ROLE_LIST = list(_ROLE_LIST) + ["Independent Rancher"]
     if not hasattr(_tg, 'ROLE_LIST'):
         setattr(_tg, 'ROLE_LIST', _ROLE_LIST)
-    # list_all_tags_from_chunks: collect union of known tag fields across chunks
+
+    # Provide list_all_tags_from_chunks that returns FOUR lists: (clusters, breeds, traits, genes)
     if not hasattr(_tg, 'list_all_tags_from_chunks'):
         def _list_all_tags_from_chunks(chunks):
-            tags = set()
+            clusters, breeds, traits, genes = set(), set(), set(), set()
             if not chunks:
-                return []
+                return ([], [], [], [])
             for ch in chunks:
                 if not isinstance(ch, dict):
                     continue
-                # common tag-like keys used in this project
-                for key in ('tags','tag','traits','genes','clusters','categories','labels'):
+                # Accept both singular and plural keys
+                for key, bucket in [
+                    ('clusters', clusters), ('cluster', clusters),
+                    ('breeds', breeds),   ('breed', breeds),
+                    ('traits', traits),   ('trait', traits),
+                    ('genes', genes),     ('gene', genes),
+                ]:
                     val = ch.get(key)
                     if not val:
                         continue
                     if isinstance(val, (list, tuple, set)):
                         for t in val:
                             if isinstance(t, str) and t.strip():
-                                tags.add(t.strip())
+                                bucket.add(t.strip())
                     elif isinstance(val, str):
                         if ',' in val:
                             for t in val.split(','):
                                 if t.strip():
-                                    tags.add(t.strip())
+                                    bucket.add(t.strip())
                         elif val.strip():
-                            tags.add(val.strip())
-            return sorted(tags)
+                            bucket.add(val.strip())
+            return (sorted(clusters), sorted(breeds), sorted(traits), sorted(genes))
         setattr(_tg, 'list_all_tags_from_chunks', _list_all_tags_from_chunks)
 except Exception:
     pass
