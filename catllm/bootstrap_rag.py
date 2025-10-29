@@ -1,5 +1,6 @@
 import os
 import traceback
+from pathlib import Path
 
 try:
     import streamlit as st
@@ -11,7 +12,7 @@ except Exception:
         def error(self, *a, **k): pass
     st = _Stub()
 
-DEFAULT_BOOTSTRAP_DIR = os.getenv('RAG_BOOTSTRAP_FOLDER', 'CLUStSTERS')
+DEFAULT_BOOTSTRAP_DIR = os.getenv('RAG_BOOTSTRAP_FOLDER', 'CLUSTERS')
 DEFAULT_STORE_DIR = os.getenv('RAG_STORE_DIR', 'data/shared_store')
 
 
@@ -19,14 +20,32 @@ def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
 
+def _resolve_folder(folder: str) -> str:
+    """Try multiple locations for a relative folder name:
+    - as given
+    - relative to CWD
+    - relative to the project root (two levels up from this file)
+    """
+    p = Path(folder)
+    if p.is_dir():
+        return str(p)
+    cwd = Path.cwd() / folder
+    if cwd.is_dir():
+        return str(cwd)
+    project_root = Path(__file__).resolve().parent.parent / folder
+    if project_root.is_dir():
+        return str(project_root)
+    return str(p)  # last resort (will fail the check upstream)
+
+
 def bootstrap_shared_store():
     """On cold deploy, build a shared RAG store from the bootstrap folder.
 
     Controlled by env vars:
-      - RAG_BOOTSTRAP_FOLDER (default: 'CLUStSTERS')
+      - RAG_BOOTSTRAP_FOLDER (default: 'CLUSTERS')
       - RAG_STORE_DIR (default: 'data/shared_store')
     """
-    folder = DEFAULT_BOOTSTRAP_DIR
+    folder = _resolve_folder(DEFAULT_BOOTSTRAP_DIR)
     store_dir = DEFAULT_STORE_DIR
 
     if not os.path.isdir(folder):
