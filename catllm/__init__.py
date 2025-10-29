@@ -20,7 +20,10 @@ try:
     try:
         from .roles import ROLE_LIST as _ROLE_LIST
     except Exception:
-        _ROLE_LIST = ["Root", "Admin", "User"]
+        _ROLE_LIST = ["Root", "Admin", "User", "Independent Rancher"]
+    # Ensure "Independent Rancher" is present to match historical default
+    if "Independent Rancher" not in _ROLE_LIST:
+        _ROLE_LIST = list(_ROLE_LIST) + ["Independent Rancher"]
     if not hasattr(_tg, 'ROLE_LIST'):
         setattr(_tg, 'ROLE_LIST', _ROLE_LIST)
     # list_all_tags_from_chunks: collect union of known tag fields across chunks
