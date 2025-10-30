@@ -1,6 +1,5 @@
 import os
 import traceback
-import inspect
 from pathlib import Path
 
 try:
@@ -26,11 +25,6 @@ def _ensure_dir(p: str):
 
 
 def _resolve_folder(folder: str) -> str:
-    """Try multiple locations for a relative folder name:
-    - as given
-    - relative to CWD
-    - relative to the project root (two levels up from this file)
-    """
     p = Path(folder)
     if p.is_dir():
         return str(p)
@@ -44,9 +38,6 @@ def _resolve_folder(folder: str) -> str:
 
 
 def _extract_store(retval):
-    """Try multiple ways to obtain a store object after build.
-    Returns (store_obj or None).
-    """
     if isinstance(retval, tuple) and len(retval) == 2:
         _idx, _store = retval
         return _store
@@ -65,6 +56,65 @@ def _get_models():
     chat = os.getenv('OPENAI_CHAT_MODEL') or 'gpt-4o-mini'
     embed = os.getenv('OPENAI_EMBEDDINGS_MODEL') or 'text-embedding-3-large'
     return chat, embed
+
+
+def _normalize_chunks(raw):
+    """Return a list[dict] shaped as {"text": str, ...}.
+    Accepts: list[dict], list[str], tuple(list, fails), {"chunks": list}, etc.
+    """
+    # Unwrap tuple: (chunks, failures)
+    if isinstance(raw, tuple) and len(raw) >= 1:
+        raw = raw[0]
+
+    # Unwrap mapping with key 'chunks'
+    if isinstance(raw, dict) and 'chunks' in raw:
+        raw = raw['chunks']
+
+    # Now ensure it's a list
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        # Single string
+        if isinstance(raw, str):
+            return [{"text": raw}]
+        # Unknown shape
+        return []
+
+    normalized = []
+    for item in raw:
+        if item is None:
+            continue
+        if isinstance(item, str):
+            t = item
+            if t.strip():
+                normalized.append({"text": t})
+            continue
+        if isinstance(item, dict):
+            # accept common keys
+            if 'text' in item and isinstance(item['text'], str):
+                normalized.append(item)
+                continue
+            if 'content' in item and isinstance(item['content'], str):
+                d = dict(item)
+                d.setdefault('text', d.pop('content'))
+                normalized.append(d)
+                continue
+            if 'page_content' in item and isinstance(item['page_content'], str):
+                d = dict(item)
+                d.setdefault('text', d.pop('page_content'))
+                normalized.append(d)
+                continue
+            # Last resort: stringify whatever is there
+            s = str(item)
+            if s.strip():
+                normalized.append({"text": s})
+            continue
+        # Lists or other types: stringify
+        s = str(item)
+        if s.strip():
+            normalized.append({"text": s})
+
+    return normalized
 
 
 def bootstrap_shared_store():
@@ -89,22 +139,28 @@ def bootstrap_shared_store():
         st.warning(f"Could not import pipeline: {e}")
         return False
 
-    ingest_folder_to_chunks = getattr(pl, 'ingest_folder_to_chunks', None)
+    # Support both new and legacy ingest entrypoints
+    ingest_fn = getattr(pl, 'ingest_folder_to_chunks', None) or getattr(pl, 'ingest_folder', None)
     build_index_from_chunks = getattr(pl, 'build_index_from_chunks', None)
-    if not ingest_folder_to_chunks or not build_index_from_chunks:
-        st.warning("Pipeline functions missing (ingest_folder_to_chunks/build_index_from_chunks) — skipping bootstrap.")
+    if not ingest_fn or not build_index_from_chunks:
+        st.warning("Pipeline functions missing — skipping bootstrap.")
         return False
 
     try:
-        chunks = ingest_folder_to_chunks(folder)
-        # Always make chunks available via session_state for zero-arg pipelines
+        raw = ingest_fn(folder)
+        chunks = _normalize_chunks(raw)
+        if not chunks:
+            st.warning("No chunks produced from folder; skipping.")
+            return False
+
         try:
             st.session_state['chunks'] = chunks
         except Exception:
             pass
 
         chat_model, embed_model = _get_models()
-        # Attempt 1: newer signature with keyword-only args
+
+        # Preferred: keyword-only signature (provider/chat_model/embed_model/corpus_chunks)
         try:
             retval = build_index_from_chunks(
                 provider='openai',
@@ -122,7 +178,7 @@ def bootstrap_shared_store():
                     corpus_chunks=chunks,
                 )
             except TypeError:
-                # Fallback: zero-arg, then positional with chunks
+                # Fallbacks for very old signatures
                 try:
                     retval = build_index_from_chunks()
                 except TypeError:
