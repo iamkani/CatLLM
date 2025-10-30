@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import List, Sequence
-import math
 
 import numpy as np
 
@@ -16,9 +15,9 @@ def _encode_len(text: str, model: str | None = None) -> int:
     if tiktoken is None:
         return max(1, len(text) // 4)
     try:
-        enc = tiktoken.encoding_for_model(model) if model else tiktoken.get_encoding('cl100k_base')
+        enc = tiktoken.encoding_for_model(model) if model else tiktoken.get_encoding("cl100k_base")
     except Exception:
-        enc = tiktoken.get_encoding('cl100k_base')
+        enc = tiktoken.get_encoding("cl100k_base")
     return len(enc.encode(text))
 
 
@@ -32,14 +31,12 @@ def _split_on_boundaries(text: str, max_tokens: int, model: str | None = None) -
     while i < n:
         j = min(n, i + approx_chars)
         window = text[i:j]
-        cut = window.rfind('
-
-')
+        cut = window.rfind("\n\n")
         if cut >= approx_chars * 2 // 3:
             j = i + cut
             window = text[i:j]
         else:
-            s_cut = window.rfind('. ')
+            s_cut = window.rfind(". ")
             if s_cut >= approx_chars * 2 // 3:
                 j = i + s_cut + 1
                 window = text[i:j]
@@ -68,9 +65,9 @@ def embed_texts(client, texts: Sequence[str], embed_model: str, *, max_tokens_pe
     flat: List[str] = []
     for t in texts:
         if t is None:
-            t = ''
+            t = ""
         parts = _split_on_boundaries(str(t), max_tokens=max_tokens_per_item, model=embed_model)
-        parts = [p for p in parts if isinstance(p, str) and p.strip()] or ['']
+        parts = [p for p in parts if isinstance(p, str) and p.strip()] or [""]
         per_item_parts.append(parts)
         flat.extend(parts)
 
