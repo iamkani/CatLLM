@@ -26,6 +26,11 @@ def _ensure_dir(p: str):
 
 
 def _resolve_folder(folder: str) -> str:
+    """Try multiple locations for a relative folder name:
+    - as given
+    - relative to CWD
+    - relative to the project root (two levels up from this file)
+    """
     p = Path(folder)
     if p.is_dir():
         return str(p)
@@ -35,7 +40,7 @@ def _resolve_folder(folder: str) -> str:
     project_root = Path(__file__).resolve().parent.parent / folder
     if project_root.is_dir():
         return str(project_root)
-    return str(p)
+    return str(p)  # last resort (will fail the check upstream)
 
 
 def _extract_store(retval):
@@ -47,20 +52,25 @@ def _extract_store(retval):
         _idx, _store = retval
         return _store
     # Try session_state conventions
-    for key in ('store','pipeline_store','rag_store','vector_store'):
-        v = getattr(st, 'session_state', {}).get(key) if hasattr(st, 'session_state') else None
-        if v is not None:
-            return v
+    if hasattr(st, 'session_state'):
+        for key in ('store','pipeline_store','rag_store','vector_store'):
+            try:
+                v = st.session_state.get(key)
+            except Exception:
+                v = None
+            if v is not None:
+                return v
     return None
 
 
 def bootstrap_shared_store():
-    """On cold deploy, build a shared RAG store from the bootstrap folder.
+    """
+    On cold deploy, build a shared RAG store from the bootstrap folder.
 
     Controlled by env vars:
       - RAG_BOOTSTRAP_FOLDER (default: 'CLUSTERS')
       - RAG_STORE_DIR (default: 'data/shared_store')
-    ""
+    """
     folder = _resolve_folder(DEFAULT_BOOTSTRAP_DIR)
     store_dir = DEFAULT_STORE_DIR
 
@@ -91,16 +101,14 @@ def bootstrap_shared_store():
     try:
         chunks = ingest_folder_to_chunks(folder)
         # Adapt to either signature: (chunks) or () using session_state
-        sig = None
         try:
             sig = inspect.signature(build_index_from_chunks)
         except Exception:
-            pass
+            sig = None
 
         if sig and len(sig.parameters) >= 1:
             retval = build_index_from_chunks(chunks)
         else:
-            # Put chunks where the pipeline might expect them
             try:
                 st.session_state['chunks'] = chunks
             except Exception:
@@ -120,7 +128,7 @@ def bootstrap_shared_store():
         except Exception as e2:
             st.warning(f"Built index, but could not persist shared store: {e2}")
             return False
-    except Exception as e:
+    except Exception:
         st.error("Bootstrap ingest failed. See logs.")
         st.write(traceback.format_exc())
         return False
