@@ -61,6 +61,12 @@ def _extract_store(retval):
     return None
 
 
+def _get_models():
+    chat = os.getenv('OPENAI_CHAT_MODEL') or 'gpt-4o-mini'
+    embed = os.getenv('OPENAI_EMBEDDINGS_MODEL') or 'text-embedding-3-large'
+    return chat, embed
+
+
 def bootstrap_shared_store():
     """Build a shared RAG store from the CLUSTERS folder on cold deploy.
 
@@ -97,11 +103,30 @@ def bootstrap_shared_store():
         except Exception:
             pass
 
-        # Prefer zero-arg call first; if it requires args, fall back to passing chunks
+        chat_model, embed_model = _get_models()
+        # Attempt 1: newer signature with keyword-only args
         try:
-            retval = build_index_from_chunks()
+            retval = build_index_from_chunks(
+                provider='openai',
+                chat_model=chat_model,
+                embed_model=embed_model,
+                corpus_chunks=chunks,
+            )
         except TypeError:
-            retval = build_index_from_chunks(chunks)
+            # Try capitalized provider
+            try:
+                retval = build_index_from_chunks(
+                    provider='OpenAI',
+                    chat_model=chat_model,
+                    embed_model=embed_model,
+                    corpus_chunks=chunks,
+                )
+            except TypeError:
+                # Fallback: zero-arg, then positional with chunks
+                try:
+                    retval = build_index_from_chunks()
+                except TypeError:
+                    retval = build_index_from_chunks(chunks)
 
         store = _extract_store(retval)
         if store is None:
