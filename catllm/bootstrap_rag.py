@@ -19,6 +19,7 @@ except Exception:
 DEFAULT_BOOTSTRAP_DIR = os.getenv('RAG_BOOTSTRAP_FOLDER', 'CLUSTERS')
 DEFAULT_STORE_DIR = os.getenv('RAG_STORE_DIR', 'data/shared_store')
 
+# --- Helpers ---------------------------------------------------------------
 
 def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
@@ -57,6 +58,8 @@ def _get_models():
     embed = os.getenv('OPENAI_EMBEDDINGS_MODEL') or 'text-embedding-3-large'
     return chat, embed
 
+
+# --- Chunk normalization & safety split -----------------------------------
 
 def _normalize_chunks(raw):
     """Return a list[dict] shaped as {"text": str, ...}.
@@ -117,6 +120,66 @@ def _normalize_chunks(raw):
     return normalized
 
 
+def _approx_tokens(text: str, chars_per_token: int = 4) -> int:
+    try:
+        n = len(text)
+    except Exception:
+        n = len(str(text))
+    return max(1, n // max(1, chars_per_token))
+
+
+def _split_text(text: str, max_chars: int) -> list[str]:
+    """Split text on friendly boundaries (\n\n, then sentences) falling back to hard slices.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    out = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + max_chars)
+        chunk = text[start:end]
+        # try to break at last paragraph boundary within window
+        last_para = chunk.rfind("\n\n")
+        if last_para >= max_chars * 2 // 3:
+            end = start + last_para
+            chunk = text[start:end]
+        else:
+            # try sentence boundary
+            last_sent = chunk.rfind('. ')
+            if last_sent >= max_chars * 2 // 3:
+                end = start + last_sent + 1
+                chunk = text[start:end]
+        out.append(chunk)
+        start = end
+    return [s for s in (c.strip() for c in out) if s]
+
+
+def _enforce_token_limit(chunks: list[dict], max_tokens: int = 7500, chars_per_token: int = 4) -> list[dict]:
+    max_chars = max_tokens * chars_per_token
+    safe = []
+    for i, ch in enumerate(chunks):
+        t = ch.get('text', '') if isinstance(ch, dict) else str(ch)
+        if not isinstance(t, str):
+            t = str(t)
+        if _approx_tokens(t, chars_per_token) <= max_tokens:
+            safe.append(ch if isinstance(ch, dict) else { 'text': t })
+            continue
+        # split
+        parts = _split_text(t, max_chars)
+        for j, part in enumerate(parts):
+            if not part:
+                continue
+            meta = dict(ch) if isinstance(ch, dict) else {}
+            meta['text'] = part
+            meta['__split__'] = True
+            meta['__parent_index__'] = i
+            meta['__part__'] = j
+            safe.append(meta)
+    return safe
+
+
+# --- Main -----------------------------------------------------------------
+
 def bootstrap_shared_store():
     """Build a shared RAG store from the CLUSTERS folder on cold deploy.
 
@@ -152,6 +215,9 @@ def bootstrap_shared_store():
         if not chunks:
             st.warning("No chunks produced from folder; skipping.")
             return False
+
+        # Safety split to avoid OpenAI 8k token limit on embeddings
+        chunks = _enforce_token_limit(chunks, max_tokens=7500, chars_per_token=4)
 
         try:
             st.session_state['chunks'] = chunks
