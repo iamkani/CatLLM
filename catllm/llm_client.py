@@ -1,7 +1,13 @@
 from __future__ import annotations
-from typing import List, Sequence
+from typing import List, Sequence, Optional, Any
 
+import os
 import numpy as np
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
 try:
     import tiktoken  # type: ignore
@@ -9,7 +15,16 @@ except Exception:
     tiktoken = None
 
 
-def _encode_len(text: str, model: str | None = None) -> int:
+def ensure_client(provider: str = "openai", **kwargs) -> Any:
+    prov = (provider or "openai").lower()
+    if prov != "openai":
+        raise ValueError(f"Unsupported provider: {provider}")
+    if OpenAI is None:
+        raise RuntimeError("openai package not installed")
+    return OpenAI(**kwargs)
+
+
+def _encode_len(text: str, model: Optional[str] = None) -> int:
     if not isinstance(text, str):
         text = str(text)
     if tiktoken is None:
@@ -21,7 +36,7 @@ def _encode_len(text: str, model: str | None = None) -> int:
     return len(enc.encode(text))
 
 
-def _split_on_boundaries(text: str, max_tokens: int, model: str | None = None) -> List[str]:
+def _split_on_boundaries(text: str, max_tokens: int, model: Optional[str] = None) -> List[str]:
     if _encode_len(text, model) <= max_tokens:
         return [text]
     approx_chars = max_tokens * 4
@@ -60,7 +75,7 @@ def _split_on_boundaries(text: str, max_tokens: int, model: str | None = None) -
     return [s for s in out if s]
 
 
-def embed_texts(client, texts: Sequence[str], embed_model: str, *, max_tokens_per_item: int = 7900, batch_size: int = 32):
+def embed_texts(client: Any, texts: Sequence[str], embed_model: str, *, max_tokens_per_item: int = 7900, batch_size: int = 32):
     per_item_parts: List[List[str]] = []
     flat: List[str] = []
     for t in texts:
@@ -92,3 +107,18 @@ def embed_texts(client, texts: Sequence[str], embed_model: str, *, max_tokens_pe
         pos += cnt
 
     return pooled
+
+
+def synthesize_answer(client: Any, *, messages: Optional[list] = None, system: Optional[str] = None, user: Optional[str] = None, model: Optional[str] = None, **kwargs) -> str:
+    mdl = model or os.getenv("OPENAI_CHAT_MODEL") or "gpt-4o-mini"
+    if messages is None:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        if user:
+            messages.append({"role": "user", "content": user})
+    resp = client.chat.completions.create(model=mdl, messages=messages, **kwargs)
+    try:
+        return resp.choices[0].message.content or ""
+    except Exception:
+        return str(resp)
