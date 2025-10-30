@@ -15,13 +15,27 @@ except Exception:
     tiktoken = None
 
 
+# -----------------------------
+# client helpers
+# -----------------------------
+
+
 def ensure_client(provider: str = "openai", **kwargs) -> Any:
+    """Return an LLM client for the given provider.
+    Currently supports OpenAI via environment/Streamlit secrets.
+    """
     prov = (provider or "openai").lower()
     if prov != "openai":
         raise ValueError(f"Unsupported provider: {provider}")
     if OpenAI is None:
         raise RuntimeError("openai package not installed")
+    # OpenAI client auto-reads OPENAI_API_KEY from env or Streamlit secrets.
     return OpenAI(**kwargs)
+
+
+# -----------------------------
+# token length + splitting
+# -----------------------------
 
 
 def _encode_len(text: str, model: Optional[str] = None) -> int:
@@ -75,7 +89,16 @@ def _split_on_boundaries(text: str, max_tokens: int, model: Optional[str] = None
     return [s for s in out if s]
 
 
+# -----------------------------
+# embeddings (with safe splitting)
+# -----------------------------
+
+
 def embed_texts(client: Any, texts: Sequence[str], embed_model: str, *, max_tokens_per_item: int = 7900, batch_size: int = 32):
+    """Embed a list of texts, automatically splitting items that exceed the
+    model's context window and mean-pooling sub-embeddings back to one vector
+    per original input.
+    """
     per_item_parts: List[List[str]] = []
     flat: List[str] = []
     for t in texts:
@@ -109,7 +132,16 @@ def embed_texts(client: Any, texts: Sequence[str], embed_model: str, *, max_toke
     return pooled
 
 
+# -----------------------------
+# chat completion helper
+# -----------------------------
+
+
 def synthesize_answer(client: Any, *, messages: Optional[list] = None, system: Optional[str] = None, user: Optional[str] = None, model: Optional[str] = None, **kwargs) -> str:
+    """Thin wrapper around chat completions.
+    You can pass a full `messages` array, or (system, user) and we'll build messages.
+    Returns the first message content string.
+    """
     mdl = model or os.getenv("OPENAI_CHAT_MODEL") or "gpt-4o-mini"
     if messages is None:
         messages = []
@@ -121,4 +153,18 @@ def synthesize_answer(client: Any, *, messages: Optional[list] = None, system: O
     try:
         return resp.choices[0].message.content or ""
     except Exception:
+        # Fallback for any SDK shape changes
         return str(resp)
+
+
+# -----------------------------
+# legacy API used by pipeline/ui
+# -----------------------------
+
+
+def answer_with_openai_web_search(client: Any, query: str, *, model: Optional[str] = None, **kwargs) -> str:
+    """Backwards-compat shim expected by pipeline.
+    This build does not perform live web search; it simply answers the query.
+    """
+    sys = ("You are a helpful assistant. Answer the user concisely.")
+    return synthesize_answer(client, system=sys, user=query, model=model, **kwargs)
