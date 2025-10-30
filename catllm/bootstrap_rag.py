@@ -40,7 +40,7 @@ def _resolve_folder(folder: str) -> str:
     project_root = Path(__file__).resolve().parent.parent / folder
     if project_root.is_dir():
         return str(project_root)
-    return str(p)  # last resort (will fail the check upstream)
+    return str(p)
 
 
 def _extract_store(retval):
@@ -48,10 +48,8 @@ def _extract_store(retval):
     Returns (store_obj or None).
     """
     if isinstance(retval, tuple) and len(retval) == 2:
-        # (index, store) common pattern
         _idx, _store = retval
         return _store
-    # Try session_state conventions
     if hasattr(st, 'session_state'):
         for key in ('store','pipeline_store','rag_store','vector_store'):
             try:
@@ -64,8 +62,7 @@ def _extract_store(retval):
 
 
 def bootstrap_shared_store():
-    """
-    On cold deploy, build a shared RAG store from the bootstrap folder.
+    """Build a shared RAG store from the CLUSTERS folder on cold deploy.
 
     Controlled by env vars:
       - RAG_BOOTSTRAP_FOLDER (default: 'CLUSTERS')
@@ -80,40 +77,31 @@ def bootstrap_shared_store():
 
     _ensure_dir(store_dir)
 
-    # Attempt to use pipeline helpers if available
     try:
-        from . import pipeline as pl  # type: ignore
+        from . import pipeline as pl
     except Exception as e:
         st.warning(f"Could not import pipeline: {e}")
         return False
 
-    try:
-        ingest_folder_to_chunks = getattr(pl, 'ingest_folder_to_chunks', None)
-        build_index_from_chunks = getattr(pl, 'build_index_from_chunks', None)
-    except Exception:
-        ingest_folder_to_chunks = None
-        build_index_from_chunks = None
-
+    ingest_folder_to_chunks = getattr(pl, 'ingest_folder_to_chunks', None)
+    build_index_from_chunks = getattr(pl, 'build_index_from_chunks', None)
     if not ingest_folder_to_chunks or not build_index_from_chunks:
         st.warning("Pipeline functions missing (ingest_folder_to_chunks/build_index_from_chunks) — skipping bootstrap.")
         return False
 
     try:
         chunks = ingest_folder_to_chunks(folder)
-        # Adapt to either signature: (chunks) or () using session_state
+        # Always make chunks available via session_state for zero-arg pipelines
         try:
-            sig = inspect.signature(build_index_from_chunks)
+            st.session_state['chunks'] = chunks
         except Exception:
-            sig = None
+            pass
 
-        if sig and len(sig.parameters) >= 1:
-            retval = build_index_from_chunks(chunks)
-        else:
-            try:
-                st.session_state['chunks'] = chunks
-            except Exception:
-                pass
+        # Prefer zero-arg call first; if it requires args, fall back to passing chunks
+        try:
             retval = build_index_from_chunks()
+        except TypeError:
+            retval = build_index_from_chunks(chunks)
 
         store = _extract_store(retval)
         if store is None:
@@ -121,7 +109,7 @@ def bootstrap_shared_store():
             return False
 
         try:
-            from .persistence import save_store  # type: ignore
+            from .persistence import save_store
             save_store(store, store_dir)
             st.info(f"Shared store built and saved to {store_dir}.")
             return True
