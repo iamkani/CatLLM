@@ -1,200 +1,170 @@
-# catllm/llm_client.py
 from __future__ import annotations
+from typing import List, Sequence, Optional, Any
 
 import os
-import math
-import time
-import logging
-from typing import Dict, List, Optional, Sequence, Tuple
-
 import numpy as np
 
 try:
-    from openai import OpenAI, AzureOpenAI  # type: ignore
+    from openai import OpenAI
 except Exception:
-    OpenAI = None  # type: ignore
-    AzureOpenAI = None  # type: ignore
-
-from .tagging import role_hint
-from .utils_text import approx_token_count
-
-logger = logging.getLogger(__name__)
+    OpenAI = None
 
 try:
-    from .utils_text import approx_token_count  # preferred
+    import tiktoken  # type: ignore
 except Exception:
-    def approx_token_count(s: str) -> int:  # fallback
-        return max(1, len(s or "") // 4)
-# -----------------------------
-# Client construction
-# -----------------------------
-def ensure_client(provider: str):
-    """
-    Return an OpenAI or Azure OpenAI client using environment variables.
-
-    OpenAI:
-      - OPENAI_API_KEY
-    Azure:
-      - AZURE_OPENAI_KEY
-      - AZURE_OPENAI_ENDPOINT
-      - AZURE_OPENAI_API_VERSION (default: 2024-08-01-preview)
-    """
-    provider = (provider or "").strip().lower()
-    if provider == "openai":
-        if OpenAI is None:
-            raise RuntimeError("openai package not available.")
-        key = os.getenv("OPENAI_API_KEY", "")
-        if not key:
-            raise RuntimeError("OPENAI_API_KEY not set.")
-        return OpenAI(api_key=key)
-    elif provider in ("azure", "azure openai", "azure-openai"):
-        if AzureOpenAI is None:
-            raise RuntimeError("openai package (AzureOpenAI) not available.")
-        key = os.getenv("AZURE_OPENAI_KEY", "")
-        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "")
-        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
-        if not key or not endpoint:
-            raise RuntimeError("Azure env vars missing: AZURE_OPENAI_KEY/AZURE_OPENAI_ENDPOINT.")
-        return AzureOpenAI(api_key=key, azure_endpoint=endpoint, api_version=api_version)
-    else:
-        raise RuntimeError(f"Unsupported provider: {provider}")
+    tiktoken = None
 
 
 # -----------------------------
-# Embeddings (safe-batched)
+# client helpers
 # -----------------------------
-def embed_texts(
-    client,
-    texts: Sequence[str],
-    embed_model: str,
-    max_req_tokens: int = 7000,
-    max_items: int = 32,
-    sleep_between: float = 0.1,
-) -> np.ndarray:
+
+
+def ensure_client(provider: str = "openai", **kwargs) -> Any:
+    """Return an LLM client for the given provider.
+    Currently supports OpenAI via environment/Streamlit secrets.
     """
-    Create embeddings for a list of texts with token-safe batching.
-    Heuristic: 4 chars ≈ 1 token.
+    prov = (provider or "openai").lower()
+    if prov != "openai":
+        raise ValueError(f"Unsupported provider: {provider}")
+    if OpenAI is None:
+        raise RuntimeError("openai package not installed")
+    # OpenAI client auto-reads OPENAI_API_KEY from env or Streamlit secrets.
+    return OpenAI(**kwargs)
+
+
+# -----------------------------
+# token length + splitting
+# -----------------------------
+
+
+def _encode_len(text: str, model: Optional[str] = None) -> int:
+    if not isinstance(text, str):
+        text = str(text)
+    if tiktoken is None:
+        return max(1, len(text) // 4)
+    try:
+        enc = tiktoken.encoding_for_model(model) if model else tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")
+    return len(enc.encode(text))
+
+
+def _split_on_boundaries(text: str, max_tokens: int, model: Optional[str] = None) -> List[str]:
+    if _encode_len(text, model) <= max_tokens:
+        return [text]
+    approx_chars = max_tokens * 4
+    parts: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        j = min(n, i + approx_chars)
+        window = text[i:j]
+        cut = window.rfind("\n\n")
+        if cut >= approx_chars * 2 // 3:
+            j = i + cut
+            window = text[i:j]
+        else:
+            s_cut = window.rfind(". ")
+            if s_cut >= approx_chars * 2 // 3:
+                j = i + s_cut + 1
+                window = text[i:j]
+        while _encode_len(window, model) > max_tokens and len(window) > 0:
+            shrink = max(1, len(window) // 10)
+            window = window[:-shrink]
+            j = i + len(window)
+        if not window:
+            break
+        parts.append(window.strip())
+        i = j
+    out: List[str] = []
+    for p in parts:
+        while _encode_len(p, model) > max_tokens:
+            ratio = max_tokens / max(1, _encode_len(p, model))
+            take = max(1, int(len(p) * ratio))
+            out.append(p[:take])
+            p = p[take:]
+        if p:
+            out.append(p)
+    return [s for s in out if s]
+
+
+# -----------------------------
+# embeddings (with safe splitting)
+# -----------------------------
+
+
+def embed_texts(client: Any, texts: Sequence[str], embed_model: str, *, max_tokens_per_item: int = 7900, batch_size: int = 32):
+    """Embed a list of texts, automatically splitting items that exceed the
+    model's context window and mean-pooling sub-embeddings back to one vector
+    per original input.
     """
-    if not texts:
-        return np.zeros((0, 1), dtype="float32")
+    per_item_parts: List[List[str]] = []
+    flat: List[str] = []
+    for t in texts:
+        if t is None:
+            t = ""
+        parts = _split_on_boundaries(str(t), max_tokens=max_tokens_per_item, model=embed_model)
+        parts = [p for p in parts if isinstance(p, str) and p.strip()] or [""]
+        per_item_parts.append(parts)
+        flat.extend(parts)
 
     embs: List[List[float]] = []
-    i = 0
-    while i < len(texts):
-        cur: List[str] = []
-        tok_sum = 0
-        while i < len(texts) and len(cur) < max_items:
-            tks = approx_token_count(texts[i])
-            if cur and tok_sum + tks > max_req_tokens:
-                break
-            cur.append(texts[i])
-            tok_sum += tks
-            i += 1
+    for s in range(0, len(flat), batch_size):
+        batch = flat[s:s+batch_size]
+        resp = client.embeddings.create(model=embed_model, input=batch)
+        for item in resp.data:
+            embs.append(item.embedding)
 
-        resp = client.embeddings.create(model=embed_model, input=cur)
-        embs.extend([d.embedding for d in resp.data])
-        if sleep_between > 0:
-            time.sleep(sleep_between)
+    pooled: List[List[float]] = []
+    pos = 0
+    for parts in per_item_parts:
+        cnt = len(parts)
+        if cnt == 1:
+            pooled.append(embs[pos])
+            pos += 1
+            continue
+        arr = np.array(embs[pos:pos+cnt], dtype=float)
+        vec = arr.mean(axis=0)
+        pooled.append(vec.tolist())
+        pos += cnt
 
-    return np.array(embs, dtype="float32")
-
-
-# -----------------------------
-# Role-aware system prompt
-# -----------------------------
-BASE_SYSTEM_PROMPT = (
-    "You are a cattle-genetics RAG assistant.\n"
-    "- Use ONLY the provided CONTEXT to answer.\n"
-    "- If the answer is not in the context, say you don't know.\n"
-    "- Be concise and precise; expand acronyms on first use.\n"
-    "- Include inline citations like [#] referencing the context items.\n"
-    "- Add a short 'Sources' section listing the cited items with their titles.\n"
-    "- For medical or veterinary advice, add: 'This is not veterinary advice.'"
-)
-
-
-def build_system_prompt_for_role(user_role: str) -> str:
-    """Augment the base system prompt with role-specific guidance."""
-    hint = role_hint(user_role or "")
-    return f"{BASE_SYSTEM_PROMPT}\n\nRole guidance for '{user_role or 'Independent Rancher'}': {hint}"
+    return pooled
 
 
 # -----------------------------
-# Chat completion
+# chat completion helper
 # -----------------------------
-def synthesize_answer(
-    client,
-    provider: str,
-    chat_model: str,
-    question: str,
-    ctx_text: str,
-    user_role: str = "Independent Rancher",
-    temperature: float = 0.1,
-) -> str:
+
+
+def synthesize_answer(client: Any, *, messages: Optional[list] = None, system: Optional[str] = None, user: Optional[str] = None, model: Optional[str] = None, **kwargs) -> str:
+    """Thin wrapper around chat completions.
+    You can pass a full `messages` array, or (system, user) and we'll build messages.
+    Returns the first message content string.
     """
-    Compose a role-aware prompt and get an answer from the model.
-    """
-    sys_prompt = build_system_prompt_for_role(user_role)
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": f"QUESTION:\n{question}\n\nCONTEXT:\n{ctx_text}"},
-    ]
-    resp = client.chat.completions.create(
-        model=chat_model, messages=messages, temperature=temperature
-    )
-    return resp.choices[0].message.content
-
-
-# -----------------------------
-# Optional: OpenAI web search fallback
-# -----------------------------
-def answer_with_openai_web_search(
-    client,
-    chat_model: str,
-    question: str,
-    user_role: str = "Independent Rancher",
-    temperature: float = 0.1,
-) -> Optional[str]:
-    """
-    Try to use OpenAI's Responses API with the 'web_search' tool (if enabled on your account).
-    If unavailable, returns None and your app can handle a graceful fallback.
-
-    Note: This feature may not be available to all orgs or models yet.
-    """
+    mdl = model or os.getenv("OPENAI_CHAT_MODEL") or "gpt-4o-mini"
+    if messages is None:
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        if user:
+            messages.append({"role": "user", "content": user})
+    resp = client.chat.completions.create(model=mdl, messages=messages, **kwargs)
     try:
-        # Some accounts expose client.responses and the 'web_search' tool.
-        sys_prompt = (
-            "You are a cattle-genetics assistant. Do a brief web search to gather 2-5 authoritative sources, "
-            "then write a concise, role-appropriate answer. Always list the sources (with titles & URLs). "
-            "If information is uncertain, state limitations clearly."
-        )
-        # The exact API surface can vary. We attempt a generic call and catch errors.
-        resp = client.responses.create(
-            model=chat_model,
-            input=[
-                {"role": "system", "content": sys_prompt + f"\n\nRole hint: {role_hint(user_role)}"},
-                {"role": "user", "content": question},
-            ],
-            tools=[{"type": "web_search"}],
-            temperature=temperature,
-        )
-        # Common shape: resp.output_text or in choices
-        text = getattr(resp, "output_text", None)
-        if text:
-            return text
-        # Fallback parse
-        if hasattr(resp, "output") and resp.output and isinstance(resp.output, list):
-            for part in resp.output:
-                if isinstance(part, dict) and part.get("type") == "message":
-                    msg = part.get("content")
-                    if isinstance(msg, str) and msg.strip():
-                        return msg
-        # Some variants pack content in choices
-        if hasattr(resp, "choices") and resp.choices:
-            c = resp.choices[0]
-            if hasattr(c, "message") and getattr(c.message, "content", None):
-                return c.message.content
-        return None
-    except Exception as e:
-        logger.debug(f"OpenAI web_search tool not available or failed: {e}")
-        return None
+        return resp.choices[0].message.content or ""
+    except Exception:
+        # Fallback for any SDK shape changes
+        return str(resp)
+
+
+# -----------------------------
+# legacy API used by pipeline/ui
+# -----------------------------
+
+
+def answer_with_openai_web_search(client: Any, query: str, *, model: Optional[str] = None, **kwargs) -> str:
+    """Backwards-compat shim expected by pipeline.
+    This build does not perform live web search; it simply answers the query.
+    """
+    sys = ("You are a helpful assistant. Answer the user concisely.")
+    return synthesize_answer(client, system=sys, user=query, model=model, **kwargs)

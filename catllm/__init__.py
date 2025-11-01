@@ -1,46 +1,63 @@
-# catllm/__init__.py
-# Keep the package surface minimal; avoid importing heavy modules here.
+# Keep package init lightweight, but add compatibility shims.
+# Do NOT import heavy submodules here except minimal patches that unblock legacy imports.
 
-from .llm import ensure_client, synthesize_answer
-from .utils_text import (
-    expand_query,
-    chunk_text,
-    read_docs,
-    read_local_folder,
-    ocr_pdf_bytes,
-)
-from .ingest import ingest_uploads, ingest_folder
-from .persistence import save_store, load_store
-from .indexer import build_faiss_index, top_k_search
+__all__ = []
 
-# format_context may live in retrieval; it's ok if some UIs provide their own
+# --- Persistence re-export for legacy imports --------------------------------
 try:
-    from .retrieval import format_context  # noqa: F401
+    from . import utils_text as _ut
+    from .persistence import save_store as _save_store, load_store as _load_store
+    setattr(_ut, 'save_store', _save_store)
+    setattr(_ut, 'load_store', _load_store)
 except Exception:
-    format_context = None  # optional export
-from .prompts import build_system_prompt_for_role, ROLE_TEMPLATES
+    pass
 
-# Roles helpers (explicit role handling)
-from .roles import apply_role_style, normalize_role, UserRole
+# --- Tagging API compatibility ------------------------------------------------
+# Some versions of the app expect `list_all_tags_from_chunks` and `ROLE_LIST` in catllm.tagging.
+try:
+    from . import tagging as _tg
+    # ROLE_LIST: try to pull from roles.py first; else define a sane default
+    try:
+        from .roles import ROLE_LIST as _ROLE_LIST
+    except Exception:
+        _ROLE_LIST = ["Root", "Admin", "User", "Independent Rancher"]
+    # Ensure "Independent Rancher" is present to match historical default
+    if "Independent Rancher" not in _ROLE_LIST:
+        _ROLE_LIST = list(_ROLE_LIST) + ["Independent Rancher"]
+    if not hasattr(_tg, 'ROLE_LIST'):
+        setattr(_tg, 'ROLE_LIST', _ROLE_LIST)
 
-__all__ = [
-    "ensure_client",
-    "synthesize_answer",
-    "expand_query",
-    "chunk_text",
-    "read_docs",
-    "read_local_folder",
-    "ocr_pdf_bytes",
-    "ingest_uploads",
-    "ingest_folder",
-    "save_store",
-    "load_store",
-    "build_faiss_index",
-    "top_k_search",
-    "format_context",
-    "build_system_prompt_for_role",
-    "ROLE_TEMPLATES",
-    "apply_role_style",
-    "normalize_role",
-    "UserRole",
-]
+    # Provide list_all_tags_from_chunks that returns FOUR lists: (clusters, breeds, traits, genes)
+    if not hasattr(_tg, 'list_all_tags_from_chunks'):
+        def _list_all_tags_from_chunks(chunks):
+            clusters, breeds, traits, genes = set(), set(), set(), set()
+            if not chunks:
+                return ([], [], [], [])
+            for ch in chunks:
+                if not isinstance(ch, dict):
+                    continue
+                # Accept both singular and plural keys
+                for key, bucket in [
+                    ('clusters', clusters), ('cluster', clusters),
+                    ('breeds', breeds),   ('breed', breeds),
+                    ('traits', traits),   ('trait', traits),
+                    ('genes', genes),     ('gene', genes),
+                ]:
+                    val = ch.get(key)
+                    if not val:
+                        continue
+                    if isinstance(val, (list, tuple, set)):
+                        for t in val:
+                            if isinstance(t, str) and t.strip():
+                                bucket.add(t.strip())
+                    elif isinstance(val, str):
+                        if ',' in val:
+                            for t in val.split(','):
+                                if t.strip():
+                                    bucket.add(t.strip())
+                        elif val.strip():
+                            bucket.add(val.strip())
+            return (sorted(clusters), sorted(breeds), sorted(traits), sorted(genes))
+        setattr(_tg, 'list_all_tags_from_chunks', _list_all_tags_from_chunks)
+except Exception:
+    pass
