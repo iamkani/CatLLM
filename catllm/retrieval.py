@@ -5,7 +5,7 @@ import faiss  # type: ignore
 import numpy as np
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .tagging import tag_text_for_meta, expand_query
+from .tagging import tag_text_for_meta, expand_query, normalize_cluster_name
 from .utils_text import chunk_text
 
 
@@ -73,7 +73,11 @@ def filter_candidates_by_cluster(
 ) -> List[Dict]:
     if not selected_clusters:
         return candidates
-    filtered = [c for c in candidates if c.get("meta", {}).get("cluster", "") in selected_clusters]
+    norm_selected = {normalize_cluster_name(c) for c in selected_clusters}
+    filtered = [
+        c for c in candidates
+        if normalize_cluster_name(c.get("meta", {}).get("cluster", "")) in norm_selected
+    ]
     return filtered if len(filtered) >= top_k else candidates
 
 

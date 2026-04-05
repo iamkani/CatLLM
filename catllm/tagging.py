@@ -136,3 +136,80 @@ ROLE_INSTRUCTIONS = {
 def role_hint(role: str) -> str:
     """Return concise, role-specific guidance string (safe default if unknown)."""
     return ROLE_INSTRUCTIONS.get(role.strip(), ROLE_INSTRUCTIONS["Independent Rancher"])
+
+
+# -----------------------------
+# Cluster name normalization
+# -----------------------------
+_CLUSTER_STRIP_RE = re.compile(r"[^a-z0-9 ]+")
+
+
+def _cluster_key(raw: str) -> str:
+    """Reduce a cluster name to a canonical comparison key."""
+    s = raw.lower().replace("&", "and").replace("-", " ")
+    s = _CLUSTER_STRIP_RE.sub(" ", s)
+    return " ".join(s.split())
+
+
+# Canonical names (data/Excel style) keyed by their stripped form.
+# Built from the 20 clusters in the training data.
+_CANONICAL_CLUSTERS: Dict[str, str] = {}
+
+_RAW_CANONICAL = [
+    "Batch Processing, Auditing, and Reporting",
+    "Batch Uploads & Report Integration",
+    "Breed-Wide Trend Analysis",
+    "Bull Selection & Breeding Strategy",
+    "Carcass Value & Terminal Trait Evaluation",
+    "Client Education & Communication",
+    "Cross-Breed Comparisons & Risk Assessment",
+    "Data Input, Upload, and Tools",
+    "Getting Started with Genetics",
+    "Lot Evaluation & GMR Understanding",
+    "Multi-Herd Management & Reporting",
+    "Price Forecasting & Strategic Buying",
+    "Research & Strategic Planning",
+    "Standardization & Index Monitoring",
+    "Testing & Scenario Planning",
+    "Tools, Integrations, and Data Flows",
+    "Tools, Visualization, and Exports",
+    "Trait Evaluation & Herd Analytics",
+    "Trait Prioritization & Custom Advice",
+    "Understanding Genetic Reports",
+]
+
+for _c in _RAW_CANONICAL:
+    _CANONICAL_CLUSTERS[_cluster_key(_c)] = _c
+
+# Aliases for known folder-name variations (plural/singular mismatches, typos)
+_CLUSTER_ALIASES = {
+    "data input uploads and tools": "Data Input, Upload, and Tools",
+    "tools integration and data flows": "Tools, Integrations, and Data Flows",
+}
+_CANONICAL_CLUSTERS.update(_CLUSTER_ALIASES)
+
+
+def normalize_cluster_name(raw: str) -> str:
+    """Map a raw cluster name (folder name or data value) to its canonical form.
+
+    Handles casing, ``&`` vs ``and``, typos like 'eveluation', 'statrted', 'ans',
+    and missing/extra punctuation.
+    """
+    if not raw or not raw.strip():
+        return raw or ""
+    key = _cluster_key(raw)
+    # Fix known typos before lookup
+    key = (
+        key.replace("eveluation", "evaluation")
+           .replace("statrted", "started")
+           .replace("visualisation", "visualization")
+           .replace(" ans ", " and ")
+    )
+    if key in _CANONICAL_CLUSTERS:
+        return _CANONICAL_CLUSTERS[key]
+    # Fuzzy fallback: find best substring match
+    for ck, cv in _CANONICAL_CLUSTERS.items():
+        if key in ck or ck in key:
+            return cv
+    # No match — return cleaned-up version
+    return raw.strip()

@@ -33,19 +33,26 @@ def render_sidebar(state):
     # Keep role available elsewhere
     st.session_state["user_role"] = user_role
 
-    # --- Model provider & models (unchanged) ---
-    provider = st.selectbox("Model Provider", ["OpenAI", "Azure OpenAI"], key="provider")
+    # --- Model provider & models ---
+    provider = st.selectbox("Model Provider", ["OpenAI", "Azure OpenAI", "Local (OpenAI-compatible)"], key="provider")
+    base_url = ""
     if provider == "OpenAI":
         chat_model  = st.text_input("OpenAI chat model", value=state.get("chat_model","gpt-4o-mini"), key="chat_model")
         embed_model = st.text_input("OpenAI embedding model", value=state.get("embed_model","text-embedding-3-large"), key="embed_model")
         st.caption("Set OPENAI_API_KEY in your environment.")
-    else:
+    elif provider == "Azure OpenAI":
         chat_model  = st.text_input("Azure chat deployment name", value=state.get("chat_model",""), key="chat_model")
         embed_model = st.text_input("Azure embeddings deployment name", value=state.get("embed_model",""), key="embed_model")
         st.caption("Set AZURE_OPENAI_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION.")
+    else:  # Local
+        base_url    = st.text_input("Server base URL", value=state.get("base_url","http://localhost:11434/v1"), key="base_url")
+        chat_model  = st.text_input("Chat model name", value=state.get("chat_model","mistral"), key="chat_model")
+        embed_model = st.text_input("Embedding model name", value=state.get("embed_model","nomic-embed-text"), key="embed_model")
+        st.caption("Supports vLLM, Ollama, LM Studio, llama.cpp server, etc.")
 
-    chunk_size = st.slider("Chunk size", 400, 1400, state.get("chunk_size",900), 50, key="chunk_size")
-    overlap    = st.slider("Chunk overlap", 0, 300, state.get("overlap",120), 10, key="overlap")
+    chunk_size   = st.slider("Chunk size", 400, 1400, state.get("chunk_size",900), 50, key="chunk_size")
+    overlap      = st.slider("Chunk overlap", 0, 300, state.get("overlap",120), 10, key="overlap")
+    smart_chunk  = st.checkbox("Paragraph-aware chunking", value=state.get("smart_chunk", True), key="smart_chunk")
     top_k      = st.slider("Top-K passages", 1, 10, state.get("top_k",5), 1, key="top_k")
 
     st.markdown("---")
@@ -78,12 +85,35 @@ def render_sidebar(state):
     st.subheader("Query options")
     use_synonyms  = st.checkbox("Expand queries with synonyms", value=state.get("use_synonyms",True), key="use_synonyms")
     show_expanded = st.checkbox("Show expanded query", value=state.get("show_expanded",False), key="show_expanded")
+    use_hybrid    = st.checkbox("Hybrid search (BM25 + vector)", value=state.get("use_hybrid", False), key="use_hybrid")
+    if provider == "OpenAI":
+        web_fallback = st.checkbox("Web search fallback if no context found", value=state.get("web_fallback", False), key="web_fallback")
+    else:
+        web_fallback = False
+
+    # --- Filters (populated from ingested corpus) ---
+    corpus = state.get("corpus_chunks", [])
+    if corpus:
+        st.markdown("---")
+        st.subheader("Filters")
+        all_clusters = sorted({c.get("meta", {}).get("cluster", "") for c in corpus} - {""})
+        all_breeds   = sorted({b for c in corpus for b in c.get("meta", {}).get("breeds", [])})
+        all_traits   = sorted({t for c in corpus for t in c.get("meta", {}).get("traits", [])})
+        all_genes    = sorted({g for c in corpus for g in c.get("meta", {}).get("genes", [])})
+        if all_clusters:
+            st.multiselect("Clusters", all_clusters, default=state.get("selected_clusters", []), key="selected_clusters")
+        if all_breeds:
+            st.multiselect("Breeds", all_breeds, default=state.get("selected_breeds", []), key="selected_breeds")
+        if all_traits:
+            st.multiselect("Traits", all_traits, default=state.get("selected_traits", []), key="selected_traits")
+        if all_genes:
+            st.multiselect("Genes", all_genes, default=state.get("selected_genes", []), key="selected_genes")
 
     return dict(
-        user_role=user_role, provider=provider, chat_model=chat_model, embed_model=embed_model,
-        chunk_size=chunk_size, overlap=overlap, top_k=top_k,
+        user_role=user_role, provider=provider, chat_model=chat_model, embed_model=embed_model, base_url=base_url,
+        chunk_size=chunk_size, overlap=overlap, top_k=top_k, smart_chunk=smart_chunk,
         uploads=uploads, use_ocr=use_ocr, ocr_max_pages=ocr_max, ocr_dpi=ocr_dpi,
         folder_path=folder_path, recursive=recursive, exts=exts, max_files=max_files, max_size_mb=max_size_mb,
         do_scan=do_scan, store_dir=store_dir, do_load=do_load, do_save=do_save, autosave=autosave,
-        use_synonyms=use_synonyms, show_expanded=show_expanded,
+        use_synonyms=use_synonyms, show_expanded=show_expanded, use_hybrid=use_hybrid, web_fallback=web_fallback,
     )

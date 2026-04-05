@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 download_pdfs.py — v3
 
@@ -14,6 +15,7 @@ Example:
     --include-external --concurrency 6 --resume --delay 1.0 --max-pages 1000
 """
 
+import logging
 import os, re, time, argparse
 from urllib.parse import urljoin, urlparse, urldefrag
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +25,8 @@ import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
 import urllib.robotparser
+
+logger = logging.getLogger(__name__)
 
 USER_AGENT = "pdf-crawler-bot/3.0 (+https://example.com)"
 PDF_URL_HINT = re.compile(r'\.pdf($|\?|#)', re.IGNORECASE)
@@ -168,7 +172,7 @@ def resume_download(session: requests.Session, url: str, target_path: Path, dela
         return True, target_path
 
     except Exception as e:
-        print(f"[error] {url} -> {target_path}: {e}")
+        logger.error("Download failed %s -> %s: %s", url, target_path, e)
         time.sleep(delay)
         return False, target_path
 
@@ -195,7 +199,7 @@ def crawl_and_download(seed_url: str, out_dir: str, max_pages=1000, delay=1.0,
         robots.set_url(robots_url)
         robots.read()
     except Exception:
-        print(f"[warn] couldn't read robots.txt at {robots_url} — proceeding cautiously")
+        logger.warning("Couldn't read robots.txt at %s — proceeding cautiously", robots_url)
 
     session = requests.Session()
     session.headers.update({"User-Agent": USER_AGENT})
@@ -214,14 +218,14 @@ def crawl_and_download(seed_url: str, out_dir: str, max_pages=1000, delay=1.0,
         visited.add(url)
 
         if not allowed_by_robots(robots, url):
-            print(f"[robots] skipping disallowed URL: {url}")
+            logger.info("Robots disallowed, skipping: %s", url)
             continue
 
         try:
             r = session.get(url, timeout=20)
             r.raise_for_status()
         except Exception as e:
-            print(f"[warn] failed to fetch {url}: {e}")
+            logger.warning("Failed to fetch %s: %s", url, e)
             continue
 
         pages_visited += 1
@@ -238,7 +242,7 @@ def crawl_and_download(seed_url: str, out_dir: str, max_pages=1000, delay=1.0,
 
         time.sleep(delay)
 
-    print(f"[crawl] pages visited: {pages_visited}, candidates to probe: {len(candidate_links)}")
+    logger.info("Pages visited: %d, candidates to probe: %d", pages_visited, len(candidate_links))
 
     # Filter to PDF links using parallel HEAD/GET probes
     pdf_links = set()
@@ -261,7 +265,7 @@ def crawl_and_download(seed_url: str, out_dir: str, max_pages=1000, delay=1.0,
             if res:
                 pdf_links.add(res)
 
-    print(f"[filter] PDFs identified: {len(pdf_links)}")
+    logger.info("PDFs identified: %d", len(pdf_links))
 
     # Download PDFs (parallel)
     group_by_domain = include_external
@@ -277,12 +281,12 @@ def crawl_and_download(seed_url: str, out_dir: str, max_pages=1000, delay=1.0,
             ok, url, path = fut.result()
             if ok:
                 success += 1
-                print(f"[ok] {url}  ->  {path}")
+                logger.info("Downloaded %s -> %s", url, path)
             else:
                 fail += 1
-                print(f"[skip/fail] {url}  ->  {path}")
+                logger.warning("Skip/fail %s -> %s", url, path)
 
-    print(f"[summary] downloaded: {success}, failed/skipped: {fail}, total PDFs: {len(pdf_links)}")
+    logger.info("Summary: downloaded=%d, failed/skipped=%d, total PDFs=%d", success, fail, len(pdf_links))
 
 def main():
     ap = argparse.ArgumentParser(description="Crawl a site and download PDFs (content-type aware).")

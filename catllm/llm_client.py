@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import os
-import math
-import time
 import logging
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -16,28 +14,14 @@ except Exception:
     AzureOpenAI = None  # type: ignore
 
 from .tagging import role_hint
-from .utils_text import approx_token_count
 
 logger = logging.getLogger(__name__)
-
-try:
-    from .utils_text import approx_token_count  # preferred
-except Exception:
-    def approx_token_count(s: str) -> int:  # fallback
-        return max(1, len(s or "") // 4)
 # -----------------------------
 # Client construction
 # -----------------------------
-def ensure_client(provider: str):
+def ensure_client(provider: str, base_url: str = ""):
     """
-    Return an OpenAI or Azure OpenAI client using environment variables.
-
-    OpenAI:
-      - OPENAI_API_KEY
-    Azure:
-      - AZURE_OPENAI_KEY
-      - AZURE_OPENAI_ENDPOINT
-      - AZURE_OPENAI_API_VERSION (default: 2024-08-01-preview)
+    Return an OpenAI, Azure OpenAI, or Local (OpenAI-compatible) client.
     """
     provider = (provider or "").strip().lower()
     if provider == "openai":
@@ -56,47 +40,18 @@ def ensure_client(provider: str):
         if not key or not endpoint:
             raise RuntimeError("Azure env vars missing: AZURE_OPENAI_KEY/AZURE_OPENAI_ENDPOINT.")
         return AzureOpenAI(api_key=key, azure_endpoint=endpoint, api_version=api_version)
+    elif provider in ("local", "local (openai-compatible)"):
+        url = base_url or os.getenv("LOCAL_API_BASE", "http://localhost:11434/v1")
+        key = os.getenv("LOCAL_API_KEY", "local")
+        return OpenAI(api_key=key, base_url=url)
     else:
         raise RuntimeError(f"Unsupported provider: {provider}")
 
 
 # -----------------------------
-# Embeddings (safe-batched)
+# Embeddings — delegated to catllm.embeddings (single source of truth)
 # -----------------------------
-def embed_texts(
-    client,
-    texts: Sequence[str],
-    embed_model: str,
-    max_req_tokens: int = 7000,
-    max_items: int = 32,
-    sleep_between: float = 0.1,
-) -> np.ndarray:
-    """
-    Create embeddings for a list of texts with token-safe batching.
-    Heuristic: 4 chars ≈ 1 token.
-    """
-    if not texts:
-        return np.zeros((0, 1), dtype="float32")
-
-    embs: List[List[float]] = []
-    i = 0
-    while i < len(texts):
-        cur: List[str] = []
-        tok_sum = 0
-        while i < len(texts) and len(cur) < max_items:
-            tks = approx_token_count(texts[i])
-            if cur and tok_sum + tks > max_req_tokens:
-                break
-            cur.append(texts[i])
-            tok_sum += tks
-            i += 1
-
-        resp = client.embeddings.create(model=embed_model, input=cur)
-        embs.extend([d.embedding for d in resp.data])
-        if sleep_between > 0:
-            time.sleep(sleep_between)
-
-    return np.array(embs, dtype="float32")
+from .embeddings import embed_texts  # noqa: F401
 
 
 # -----------------------------

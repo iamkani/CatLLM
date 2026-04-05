@@ -8,6 +8,7 @@ from typing import List, Tuple, Dict, Callable, Optional
 
 from pypdf import PdfReader
 
+logger = logging.getLogger(__name__)
 logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # -----------------------
@@ -49,6 +50,22 @@ def expand_query(q: str) -> str:
         return q
     return q + " " + " ".join(extra_terms)
 
+
+def looks_like_idk(text: str) -> bool:
+    """Check if an LLM answer declares it doesn't know."""
+    t = (text or "").lower()
+    return any(
+        p in t
+        for p in [
+            "i don't know",
+            "i do not know",
+            "not present in the context",
+            "cannot find this in the context",
+            "no information in the provided context",
+        ]
+    )
+
+
 # -------------
 # Text chunking
 # -------------
@@ -65,6 +82,55 @@ def chunk_text(text: str, chunk_size: int = 900, overlap: int = 120) -> List[str
             break
         start = max(0, end - overlap)
     return chunks
+
+
+_PARAGRAPH_RE = re.compile(r'\n\s*\n')
+_SENTENCE_RE = re.compile(r'(?<=[.!?])\s+')
+
+
+def chunk_text_smart(text: str, chunk_size: int = 900, overlap: int = 120) -> List[str]:
+    """Paragraph-aware chunker: splits on paragraph boundaries, then sentences,
+    falling back to word-window for oversized blocks."""
+    paragraphs = [p.strip() for p in _PARAGRAPH_RE.split(text) if p.strip()]
+    if not paragraphs:
+        return chunk_text(text, chunk_size, overlap)
+
+    # Break large paragraphs into sentences
+    units: List[str] = []
+    for para in paragraphs:
+        words = para.split()
+        if len(words) <= chunk_size:
+            units.append(para)
+        else:
+            sentences = _SENTENCE_RE.split(para)
+            for sent in sentences:
+                sw = sent.split()
+                if len(sw) <= chunk_size:
+                    units.append(sent)
+                else:
+                    # Oversized sentence — word-window fallback
+                    units.extend(chunk_text(sent, chunk_size, overlap))
+
+    # Accumulate units into chunks respecting size limit
+    chunks: List[str] = []
+    buf: List[str] = []
+    buf_words = 0
+
+    for unit in units:
+        uw = len(unit.split())
+        if buf and buf_words + uw > chunk_size:
+            chunks.append("\n\n".join(buf))
+            # Carry overlap from end of emitted chunk
+            carry = " ".join("\n\n".join(buf).split()[-overlap:]) if overlap > 0 else ""
+            buf = [carry] if carry else []
+            buf_words = len(carry.split()) if carry else 0
+        buf.append(unit)
+        buf_words += uw
+
+    if buf:
+        chunks.append("\n\n".join(buf))
+
+    return chunks if chunks else chunk_text(text, chunk_size, overlap)
 
 # ----------------
 # Deduping helpers
@@ -89,7 +155,8 @@ def ocr_pdf_bytes(pdf_bytes: bytes, max_pages: int = 10, dpi: int = 200) -> str:
         import pdf2image
         import pytesseract
         from PIL import Image  # noqa: F401
-    except Exception:
+    except ImportError:
+        logger.debug("OCR dependencies not installed (pdf2image/pytesseract/Pillow)")
         return ""
     try:
         pages = pdf2image.convert_from_bytes(pdf_bytes, dpi=dpi, first_page=1, last_page=max_pages)
@@ -98,11 +165,13 @@ def ocr_pdf_bytes(pdf_bytes: bytes, max_pages: int = 10, dpi: int = 200) -> str:
             try:
                 txt = pytesseract.image_to_string(img)
             except Exception:
+                logger.warning("OCR failed on a page", exc_info=True)
                 txt = ""
             if txt:
                 texts.append(txt)
         return "\n".join(texts)
     except Exception:
+        logger.warning("OCR conversion failed", exc_info=True)
         return ""
 
 # ---------------
@@ -154,6 +223,7 @@ def read_docs(
                     pieces.append(page.extract_text() or "")
                 text = "\n".join(pieces)
             except Exception:
+                logger.warning("PDF text extraction failed for %s", name, exc_info=True)
                 text = ""
 
             # Optional OCR if no text
@@ -179,7 +249,7 @@ def read_docs(
 
 def read_local_folder(
     folder_path: str,
-    exts: List[str] | None = None,
+    exts: Optional[List[str]] = None,
     recursive: bool = True,
     max_files: int = 200,
     max_size_mb: int = 50,
@@ -255,6 +325,7 @@ def read_local_folder(
                         pieces.append(page.extract_text() or "")
                     text = "\n".join(pieces)
                 except Exception:
+                    logger.warning("PDF text extraction failed for %s", p, exc_info=True)
                     text = ""
                 if use_ocr and not text.strip():
                     text = ocr_pdf_bytes(raw, max_pages=ocr_max_pages, dpi=ocr_dpi)
@@ -277,9 +348,13 @@ def read_local_folder(
             except Exception:
                 cluster = ""
 
+            from .tagging import normalize_cluster_name
+            cluster = normalize_cluster_name(cluster)
+
             docs.append((p.name, text, {"cluster": cluster, "path": str(p)}))
 
         except Exception:
+            logger.warning("Failed to process %s", p, exc_info=True)
             fails.append(str(p))
             continue
 

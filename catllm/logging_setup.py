@@ -1,6 +1,8 @@
+from __future__ import annotations
 import logging, os
+from typing import Union
 
-def setup_logging(level: str | int = None):
+def setup_logging(level: Union[str, int, None] = None):
     if level is None:
         level = os.getenv("CATLLM_LOG_LEVEL", "INFO").upper()
     logging.basicConfig(

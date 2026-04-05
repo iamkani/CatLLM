@@ -10,9 +10,8 @@ import faiss  # type: ignore
 from .utils_text import (
     read_local_folder,
     read_docs,
-    save_store,
-    load_store,
 )
+from .persistence import save_store, load_store
 from .retrieval import (
     build_faiss_index,
     make_chunks_from_docs,
@@ -179,15 +178,4 @@ def generate_answer_from_rag(
     return answer, ctx_items
 
 
-def _looks_like_idk(text: str) -> bool:
-    t = (text or "").lower()
-    return any(
-        p in t
-        for p in [
-            "i don't know",
-            "i do not know",
-            "not present in the context",
-            "cannot find this in the context",
-            "no information in the provided context",
-        ]
-    )
+from .utils_text import looks_like_idk as _looks_like_idk  # noqa: E402

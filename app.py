@@ -5,8 +5,8 @@ from catllm.logging_setup import setup_logging
 from catllm.ingest import ingest_uploads, ingest_folder
 from catllm.persistence import save_store, load_store
 from catllm.embeddings import embed_texts
-from catllm.indexer import build_faiss_index as build_index
-from catllm.utils_text import chunk_text
+from catllm.indexer import build_faiss_index as build_index, build_bm25_index
+from catllm.utils_text import chunk_text, chunk_text_smart
 from catllm.tagging import tag_text_for_meta
 from catllm.llm import ensure_client
 from catllm.ui.tabchat import render_tab_chat
@@ -31,6 +31,7 @@ with st.sidebar:
     provider    = ui["provider"]
     chat_model  = ui["chat_model"]
     embed_model = ui["embed_model"]
+    st.session_state["base_url"] = ui.get("base_url", "")
 
 # Load store
 if ui["do_load"]:
@@ -40,30 +41,32 @@ if ui["do_load"]:
         st.session_state["corpus_chunks"] = cc
         st.session_state["embeddings"] = embs
         st.session_state["index"] = idx
+        texts = [c.get("text", "") for c in cc if c.get("text", "").strip()]
+        st.session_state["bm25_index"] = build_bm25_index(texts)
         st.success(f"Loaded {len(cc)} chunks.")
 
 # Uploads
 if ui["uploads"]:
     docs = ingest_uploads(ui["uploads"], use_ocr=ui["use_ocr"], ocr_max_pages=ui["ocr_max_pages"],
                           ocr_dpi=ui["ocr_dpi"], seen_hashes=set())
+    chunker = chunk_text_smart if ui.get("smart_chunk") else chunk_text
     chunks=[]
     for title, text in docs:
-        for ch in chunk_text(text, ui["chunk_size"], ui["overlap"]):
+        for ch in chunker(text, ui["chunk_size"], ui["overlap"]):
             meta = {"title": title, "source": title}
             meta.update(tag_text_for_meta(ch))
             chunks.append({"text": ch, "meta": meta})
     st.session_state["corpus_chunks"] = chunks
 
     with st.spinner("Embedding & indexing…"):
-        client = ensure_client(ui["provider"])
-        print("chunks_len:", len(chunks))
+        client = ensure_client(ui["provider"], base_url=ui.get("base_url", ""))
+        logger.info("chunks_len: %d", len(chunks))
         if chunks:
-            print("first_chunk_keys:", list(chunks[0].keys()))
+            logger.debug("first_chunk_keys: %s", list(chunks[0].keys()))
             nonempty = sum(1 for c in chunks if isinstance(c.get("text"), str) and c["text"].strip())
-            print("nonempty_text_chunk_count:", nonempty)
+            logger.info("nonempty_text_chunk_count: %d", nonempty)
         texts = [c.get("text","").strip() for c in chunks if isinstance(c.get("text"), str) and c.get("text","").strip()]
         if not texts:
-            import streamlit as st
             st.error("No extractable text found. Check your ingest folder/filters or enable OCR for scanned PDFs.")
             st.stop()
 
@@ -72,6 +75,7 @@ if ui["uploads"]:
         idx  = build_index(embs)
         st.session_state["embeddings"] = embs
         st.session_state["index"] = idx
+        st.session_state["bm25_index"] = build_bm25_index(texts)
     st.success(f"Ingested {len(chunks)} chunks from {len(docs)} doc(s).")
     if ui["autosave"]:
         save_store(ui["store_dir"], chunks, embs, idx)
@@ -92,25 +96,25 @@ if ui["do_scan"] and ui["folder_path"].strip():
     if not docs:
         status.update(label="No files found.", state="warning")
     else:
+        chunker = chunk_text_smart if ui.get("smart_chunk") else chunk_text
         chunks=[]
         for item in docs:
             title, text, extra = item if len(item)==3 else (item[0], item[1], {})
-            for ch in chunk_text(text, ui["chunk_size"], ui["overlap"]):
+            for ch in chunker(text, ui["chunk_size"], ui["overlap"]):
                 meta = {"title": title, "source": title}
                 meta.update(extra); meta.update(tag_text_for_meta(ch))
                 chunks.append({"text": ch, "meta": meta})
         st.session_state["corpus_chunks"] = chunks
 
         status.update(label=f"Embedding {len(chunks)} chunks…", state="running")
-        client = ensure_client(ui["provider"])
-        print("chunks_len:", len(chunks))
-        print("first_chunk_keys:", list(chunks[0].keys()) if chunks else "no chunks")
+        client = ensure_client(ui["provider"], base_url=ui.get("base_url", ""))
+        logger.info("chunks_len: %d", len(chunks))
+        logger.debug("first_chunk_keys: %s", list(chunks[0].keys()) if chunks else "no chunks")
         nonempty = [c for c in chunks if isinstance(c.get("text"), str) and c.get("text").strip()]
-        print("nonempty_text_chunks:", len(nonempty))
+        logger.info("nonempty_text_chunks: %d", len(nonempty))
         # build the list of usable strings before calling
         texts = [c.get("text","").strip() for c in chunks if isinstance(c.get("text"), str) and c.get("text","").strip()]
         if not texts:
-            import streamlit as st
             st.error("No extractable text found. Check your ingest folder/filters or enable OCR for scanned PDFs.")
             st.stop()
 
@@ -119,6 +123,7 @@ if ui["do_scan"] and ui["folder_path"].strip():
         idx  = build_index(embs)
         st.session_state["embeddings"] = embs
         st.session_state["index"] = idx
+        st.session_state["bm25_index"] = build_bm25_index(texts)
         status.update(label=f"Ingested {len(chunks)} chunks from {len(docs)} file(s).", state="complete")
         if fails:
             with st.expander(f"{len(fails)} file(s) failed to parse"):

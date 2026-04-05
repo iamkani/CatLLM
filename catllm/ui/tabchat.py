@@ -2,13 +2,14 @@
 from __future__ import annotations
 import streamlit as st
 
-from ..llm import ensure_client, synthesize_answer
-from ..embeddings import embed_texts
-from ..indexer import top_k_search
+from ..llm import ensure_client, synthesize_answer, synthesize_answer_stream
+from ..llm_client import answer_with_openai_web_search
+from ..embeddings import embed_texts_cached
+from ..indexer import top_k_search, hybrid_search
 from ..retrieval import format_context
 from ..prompts import build_system_prompt_for_role
 from ..roles import apply_role_style
-from ..utils_text import expand_query
+from ..utils_text import expand_query, looks_like_idk
 
 
 def _get(key: str, default=None):
@@ -50,21 +51,27 @@ def render_tab_chat(state):
         st.session_state.setdefault("messages", []).append({"role": "user", "content": pending_q})
 
         # Retrieval + answer generation
-        client = ensure_client(provider)
+        client = ensure_client(provider, base_url=_get("base_url", ""))
 
         expanded_q = expand_query(pending_q) if use_synonyms else pending_q
         if show_expanded and expanded_q != pending_q:
             # Quick caption just above the answer for transparency
             st.caption(f"Expanded query: {expanded_q}")
 
-        q_vec = embed_texts(client, [expanded_q], embed_model)
+        st.session_state.setdefault("embed_cache", {})
+        q_vec = embed_texts_cached(client, [expanded_q], embed_model, cache=st.session_state["embed_cache"])
 
         search_k = top_k
         if _get("selected_clusters"):
             search_k = max(50, top_k * 5)
 
-        I, _D = top_k_search(_get("index"), q_vec, k=search_k)
-        candidates = [_get("corpus_chunks")[i] for i in I]
+        corpus = _get("corpus_chunks")
+        bm25 = _get("bm25_index")
+        if _get("use_hybrid") and bm25 is not None:
+            I, D = hybrid_search(_get("index"), bm25, q_vec, expanded_q, len(corpus), k=search_k)
+        else:
+            I, D = top_k_search(_get("index"), q_vec, k=search_k)
+        paired = [(corpus[i], float(s)) for i, s in zip(I, D)]
 
         # Optional filtering by cluster/tags
         selected_clusters = _get("selected_clusters", [])
@@ -73,9 +80,9 @@ def render_tab_chat(state):
         selected_genes    = _get("selected_genes", [])
 
         if selected_clusters:
-            filt = [c for c in candidates if c.get("meta", {}).get("cluster", "") in selected_clusters]
+            filt = [(c, s) for c, s in paired if c.get("meta", {}).get("cluster", "") in selected_clusters]
             if len(filt) >= top_k:
-                candidates = filt
+                paired = filt
 
         def _match_tags(meta):
             if selected_breeds and not (set(meta.get("breeds", [])) & set(selected_breeds)):
@@ -87,11 +94,13 @@ def render_tab_chat(state):
             return True
 
         if selected_breeds or selected_traits or selected_genes:
-            filt = [c for c in candidates if _match_tags(c.get("meta", {}))]
+            filt = [(c, s) for c, s in paired if _match_tags(c.get("meta", {}))]
             if len(filt) >= top_k:
-                candidates = filt
+                paired = filt
 
-        ctx_items = candidates[:top_k]
+        chosen = paired[:top_k]
+        ctx_items = [c for c, _ in chosen]
+        ctx_scores = [s for _, s in chosen]
         ctx_text  = format_context(ctx_items)
 
         # Role-aware system prompt (explicit; we never infer)
@@ -102,16 +111,24 @@ def render_tab_chat(state):
             {"role": "user",   "content": f"QUESTION:\n{pending_q}\n\nCONTEXT:\n{ctx_text}"},
         ]
 
-        with st.spinner("Thinking…"):
-            raw = synthesize_answer(client, provider, chat_model, messages)
+        with st.chat_message("assistant"):
+            raw = st.write_stream(synthesize_answer_stream(client, provider, chat_model, messages))
+
+        # Web search fallback if answer is "I don't know" and fallback is enabled
+        if _get("web_fallback") and looks_like_idk(raw):
+            with st.spinner("No context found — trying web search…"):
+                alt = answer_with_openai_web_search(client, chat_model, pending_q, user_role)
+            if alt:
+                raw = f"> *Web search was used because no relevant context was found.*\n\n{alt}"
 
         answer = apply_role_style(user_role, raw)
 
         # Append assistant response to history
         st.session_state["messages"].append({"role": "assistant", "content": answer})
 
-        # Also stash last retrieval context for the expander (optional)
+        # Stash last retrieval context + scores for the expander
         st.session_state["last_ctx_items"] = ctx_items
+        st.session_state["last_ctx_scores"] = ctx_scores
 
     # --- Render the FULL chat history (user & assistant) ABOVE the input ---
     for m in _get("messages", []):
@@ -121,10 +138,14 @@ def render_tab_chat(state):
     # Optional transparency block for last turn
     if "last_ctx_items" in st.session_state and st.session_state["last_ctx_items"]:
         ctx_items = st.session_state["last_ctx_items"]
+        ctx_scores = st.session_state.get("last_ctx_scores", [])
         with st.expander("Retrieved context"):
             for idx, item in enumerate(ctx_items, 1):
                 meta = item.get("meta", {})
-                st.markdown(f"**[{idx}] {meta.get('title','Unknown')}**")
+                score = ctx_scores[idx - 1] if idx - 1 < len(ctx_scores) else 0.0
+                pct = max(0.0, min(100.0, score * 100))
+                st.markdown(f"**[{idx}] {meta.get('title','Unknown')}** — relevance {pct:.0f}%")
+                st.progress(pct / 100)
                 st.caption(
                     f"Cluster: {meta.get('cluster','')}  |  "
                     f"Breeds: {', '.join(meta.get('breeds', []))}  |  "

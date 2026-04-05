@@ -222,7 +222,7 @@ def search(
     k: int = 5,
     diversify: bool = False,
     lambda_mult: float = 0.5,
-    embeddings: _np.ndarray | None = None,
+    embeddings: _np.ndarray = None,
 ):
     """
     Wrapper expected by UI:
@@ -254,3 +254,52 @@ def search(
 
     # no diversification
     return I[:k].tolist(), D[:k].tolist()
+
+
+# --- BM25 hybrid search ---
+
+def build_bm25_index(corpus_texts):
+    """Build a BM25 index from a list of text strings."""
+    from rank_bm25 import BM25Okapi
+    tokenized = [t.lower().split() for t in corpus_texts]
+    return BM25Okapi(tokenized)
+
+
+def hybrid_search(
+    faiss_index,
+    bm25_index,
+    query_vec: _np.ndarray,
+    query_text: str,
+    corpus_size: int,
+    k: int = 5,
+    faiss_weight: float = 0.6,
+    fetch_k: int = 50,
+):
+    """Reciprocal Rank Fusion of FAISS vector search + BM25 keyword search.
+
+    Returns (indices, scores) as lists of length k.
+    """
+    rrf_k = 60  # standard RRF constant
+
+    # FAISS results
+    f_I, f_D = top_k_search(faiss_index, query_vec, k=fetch_k)
+
+    # BM25 results
+    bm25_scores = bm25_index.get_scores(query_text.lower().split())
+    bm25_top = _np.argsort(bm25_scores)[::-1][:fetch_k]
+
+    # Build RRF scores
+    rrf: dict = {}
+    for rank, idx in enumerate(f_I):
+        idx = int(idx)
+        rrf[idx] = rrf.get(idx, 0.0) + faiss_weight / (rank + rrf_k)
+    bm25_weight = 1.0 - faiss_weight
+    for rank, idx in enumerate(bm25_top):
+        idx = int(idx)
+        rrf[idx] = rrf.get(idx, 0.0) + bm25_weight / (rank + rrf_k)
+
+    # Sort by RRF score descending
+    sorted_items = sorted(rrf.items(), key=lambda x: x[1], reverse=True)[:k]
+    indices = [i for i, _ in sorted_items]
+    scores = [s for _, s in sorted_items]
+    return indices, scores

@@ -1,11 +1,15 @@
 # catllm/embeddings.py
 from typing import Iterable, List
 import json
+import logging
 import numpy as np
 import math
 import re
+import time
 import unicodedata
 from openai import BadRequestError
+
+logger = logging.getLogger(__name__)
 
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")  # strip lone surrogates (invalid in JSON)
 
@@ -75,19 +79,43 @@ def _batched(seq: List[str], size: int):
     for i in range(0, len(seq), size):
         yield i, seq[i:i+size]
 
-def embed_texts(client, texts: Iterable, model: str, batch_size: int = 128):
+def embed_texts(
+    client,
+    texts: Iterable,
+    model: str,
+    batch_size: int = 128,
+    max_req_tokens: int = 7000,
+    sleep_between: float = 0.1,
+):
     """
-    Returns a list of embeddings (float lists) aligned with the concatenated input order.
+    Returns a numpy array of embeddings (N, dim) aligned with the input order.
+
+    Combines sanitisation with token-safe batching so that individual API
+    requests stay within safe token limits.
     """
     safe = _sanitize_inputs(texts)
     all_embs: List[List[float]] = []
-    for offset, batch in _batched(safe, batch_size):
-        # final per-batch JSON check
+
+    # Token-safe batching: respect both item count and approximate token budget
+    i = 0
+    while i < len(safe):
+        batch: List[str] = []
+        tok_sum = 0
+        while i < len(safe) and len(batch) < batch_size:
+            tks = max(1, len(safe[i]) // 4)  # ≈ 4 chars per token
+            if batch and tok_sum + tks > max_req_tokens:
+                break
+            batch.append(safe[i])
+            tok_sum += tks
+            i += 1
+
+        # Final per-batch JSON validity check
         json.dumps({"input": batch}, ensure_ascii=True, allow_nan=False)
         try:
             resp = client.embeddings.create(model=model, input=batch)
         except BadRequestError as e:
             # Narrow down which item in this batch breaks things
+            offset = i - len(batch)
             for j, s in enumerate(batch):
                 try:
                     client.embeddings.create(model=model, input=[s])
@@ -96,7 +124,36 @@ def embed_texts(client, texts: Iterable, model: str, batch_size: int = 128):
                         f"Embeddings batch failed. First bad item at global index {offset + j}. "
                         f"Snippet: {repr(s[:160])}"
                     ) from e
-            # If none individually failed, rethrow original
             raise
         all_embs.extend(d.embedding for d in resp.data)
+        if sleep_between > 0:
+            time.sleep(sleep_between)
+
+    logger.debug("Embedded %d texts into %d vectors", len(safe), len(all_embs))
     return np.asarray(all_embs, dtype="float32")
+
+
+def embed_texts_cached(
+    client,
+    texts: Iterable,
+    model: str,
+    cache: dict = None,
+    **kwargs,
+) -> np.ndarray:
+    """Thin wrapper around embed_texts with an optional dict cache for small queries.
+
+    Only caches batches of ≤ 2 texts (i.e. single-query lookups).
+    Corpus-scale calls pass through uncached.
+    """
+    text_list = list(texts) if not isinstance(texts, list) else texts
+    if cache is None or len(text_list) > 2:
+        return embed_texts(client, text_list, model, **kwargs)
+
+    key = (model, tuple(text_list))
+    if key in cache:
+        logger.debug("Embedding cache hit for %d texts", len(text_list))
+        return cache[key]
+
+    result = embed_texts(client, text_list, model, **kwargs)
+    cache[key] = result
+    return result

@@ -1,7 +1,8 @@
 import json, streamlit as st, pandas as pd, numpy as np
-from ..embeddings import embed_texts
+from ..embeddings import embed_texts_cached
 from ..indexer import search
 from ..llm import ensure_client, synthesize_answer
+from ..prompts import build_system_prompt_for_role
 from ..retrieval import format_context
 
 def render_generator(state, corpus_chunks, index):
@@ -27,18 +28,18 @@ def render_generator(state, corpus_chunks, index):
     q_col = next((c for c in df.columns if c.lower() in {"question","q","prompt","query"}), None)
     if not q_col: st.error("Could not find a question column (question/q/prompt/query)."); return
 
-    client = ensure_client(state["provider"])
+    client = ensure_client(state["provider"], base_url=state.get("base_url", ""))
     questions = [str(x).strip() for x in df[q_col].tolist() if str(x).strip()]
     progress = st.progress(0); results = []; total = len(questions)
 
     for i, qtext in enumerate(questions, 1):
-        qvec = embed_texts(client, state["embed_model"], [qtext])
+        qvec = embed_texts_cached(client, [qtext], state["embed_model"], cache=st.session_state.setdefault("embed_cache", {}))
         I, D = search(index, qvec, k=infer_topk)
         ctx_items = [corpus_chunks[j] for j in I]
         ctx_text = format_context(ctx_items)
 
         messages = [
-            {"role":"system","content": state.get("system_prompt","You are a cattle-genetics RAG assistant.")},
+            {"role":"system","content": build_system_prompt_for_role(state.get("user_role", "Independent Rancher"))},
             {"role":"user","content": f"QUESTION:\n{qtext}\n\nCONTEXT:\n{ctx_text}"}
         ]
         ans = synthesize_answer(client, state["provider"], state["chat_model"], messages)
